@@ -27,10 +27,6 @@ class supjav:
         }
         self.session.headers.update(headers)
 
-    def verify_success(self, sb):
-        sb.assert_element('img[alt="Logo Assembly"]', timeout=4)
-        sb.sleep(3)
-
     def get_safe_title(self, html, max_length=100):
         soup = BeautifulSoup(html, "html.parser")
         if soup is None: 
@@ -41,42 +37,41 @@ class supjav:
         if max_length:
             return re.sub(r'[\\/*?:"<>|\'() ]', '_', title.text)[:max_length]
         return re.sub(r'[\\/*?:"<>|\'() ]', '_', title.text)
+    
+    def load_page(self, url):
+        html = None
+        with SB(
+            uc=True,
+        ) as sb:
+            print(f"open: {url}")
+            sb.uc_open_with_reconnect(url, 3)
 
-    def is_page_loaded(self, sb) -> bool:
-        return (
-            sb.is_element_present("video") or
-            sb.is_element_present("meta[property='og:title']") or
-            sb.is_element_present("h1") or
-            "supjav.com" in sb.get_current_url()
-        )
+            try:
+                # video-wrap がDOMに出たらロード完了扱い
+                sb.wait_for_element_present("a.btn-server.active", timeout=30)
+                print("A necessary part loaded.")
+                html = sb.get_page_source()
+            except Exception as e:
+                print("video-wrap not loaded:", e)
+                html = sb.get_page_source()
 
-    def is_captcha_page(self, sb) -> bool:
-        return (
-            sb.is_element_present('input[value*="Verify"]') or
-            sb.is_text_visible("Checking your browser") or
-            sb.is_text_visible("Verify you are human")
-        )
+            return html
 
     def complete_browser_process(self, url):
         html = None
         with SB(uc=True) as sb:
-            print("open", flush=True)
+            print(f"open: {url}")
             sb.uc_open_with_reconnect(url, 3)
 
-            if self.is_captcha_page(sb):
-                print("captcha loaded")
-                if sb.is_element_visible('input[value*="Verify"]'):
-                    sb.uc_click('input[value*="Verify"]')
-                else:
-                    sb.uc_gui_click_captcha()
-
-                sb.sleep(3)
-
-            if self.is_page_loaded(sb):
-                print("page loaded")
+            try:
+                # video-wrap is in DOM?
+                sb.wait_for_element_present("a.btn-server.active", timeout=30)
+                print("A necessary part loaded.")
                 html = sb.get_page_source()
-            else:
-                print("page not loaded")
+            except Exception as e:
+                print("video-wrap not loaded:", e)
+                html = sb.get_page_source()
+
             if html and self.click_video_button(sb):
                 if sb.wait_for_ready_state_complete():
                     iframe = sb.find_element("iframe#video")
@@ -159,12 +154,46 @@ class supjav:
             return urls
         return []
     
-    def run(url, path):
-        app = supjav()
-        html, iframe_html = app.complete_browser_process(url)
-        master_url = app.get_master_url(iframe_html)
-        index_url = app.get_video_index(master_url)
-        urls = app.get_video_urls(index_url)
-        title = app.get_safe_title(html)
+    def get_iframe(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        vurl = soup.select_one(".btn-server.active").get("data-link")
+        if vurl is None:
+            print("vurl is not found.")
+            return None
+        bg = soup.select_one("#dz_video").get("bg")
+        if bg is None:
+            bg = "undefined"
+        
+        # This is a parent iframe url. Just for your info.
+        # iframe_url = "https://lk1.supremejav.com/supjav.php?l="+vurl+"&bg="+bg
+        
+        reversed_vurl = vurl[::-1]
+
+        return "https://lk1.supremejav.com/supjav.php?c="+reversed_vurl+"&bg="+bg
+    
+    def get_inner_iframe_html(self, iframe_url):
+        headers = {
+            "referer": "https://supjav.com/"
+        }
+        res = self.session.get(iframe_url, headers=headers)
+        if res.status_code == 200 and res.text != "404":
+            return res.text
+        return None
+
+    
+    def run(self, url, path):
+        # Finally, it is now faster than before!!
+        html = self.load_page(url)
+        if html is None:
+            raise("It seems like the url you provided is not correct.")
+        inner_iframe_url = self.get_iframe(html)
+        iframe_html = self.get_inner_iframe_html(inner_iframe_url)
+        if iframe_html is None:
+            print("The fastest way was not working. Let's use an alternative way...")
+            html, iframe_html = self.complete_browser_process(url)
+        master_url = self.get_master_url(iframe_html)
+        index_url = self.get_video_index(master_url)
+        urls = self.get_video_urls(index_url)
+        title = self.get_safe_title(html)
         downloader = Downloader()
         downloader.get_video(urls, path, title)

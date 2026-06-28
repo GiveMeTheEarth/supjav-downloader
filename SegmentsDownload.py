@@ -5,6 +5,7 @@ import os
 import asyncio
 import aiohttp
 import aiofiles
+import shutil
 
 class Downloader:
     def __init__(self):
@@ -55,6 +56,7 @@ class Downloader:
         downloaded_files = set()
         total_segments = len(urls)
         completed_segments = 0
+        download_failed = 0
 
         print('#' * 60)
         sem = asyncio.Semaphore(20)
@@ -78,7 +80,7 @@ class Downloader:
             tasks = []
 
             for idx, url in enumerate(urls):
-                file_path = os.path.join(download_folder, f"{filename}{idx}.ts")
+                file_path = os.path.join(download_folder, f"{idx:06d}.ts")
                 if os.path.exists(file_path):
                     if os.path.getsize(file_path) > self.MIN_TS_SIZE:
                         downloaded_files.add(file_path)
@@ -141,11 +143,19 @@ class Downloader:
         return renamed_files
 
     def get_video(self, urls, output_folder, filename):
-        temp_folder = r'./temp_download'
+        safe_filename = re.sub(r'[\\/:*?"<>|]', '_', filename)
+        temp_folder = os.path.join('./temp_download', safe_filename)
         """ ダウンロードした動画セグメントを結合してmp4にする """
 
         # check a folder that stores videos
         self.__check_folder_exsist(output_folder)
+
+        # 2. 出力ファイル名を決定
+        output_file = os.path.join(output_folder, f"{filename}.mp4")
+
+        # 同じファイル名のmp4がすでにあるなら、ダウンロード前に止める
+        if os.path.exists(output_file):
+            raise FileExistsError(f"Output file already exists: {output_file}")
 
         # 1. ダウンロードする（並列処理）
         downloaded_files = asyncio.run(self.download_video(urls, temp_folder, filename))
@@ -157,9 +167,6 @@ class Downloader:
         # if downloaded files' extensions are jpeg, change it to ts.
         if self.check_fake_extension(downloaded_files):
             downloaded_files = self.change_extension(downloaded_files)
-
-        # 2. 出力ファイル名を決定
-        output_file = os.path.join(output_folder, f"{filename}.mp4")
         
         # 3. ffmpegのリストファイルを作成
         list_file = f"{temp_folder}/temp_file_list.txt"
@@ -169,13 +176,21 @@ class Downloader:
             for file in sorted_files:
                 f.write(f"file '{os.path.abspath(file)}'\n")
         
-        # 4. ffmpegで結合
+        # 4. ffmpeg
         cmd = [
-            'ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_file,
-            '-map', '0:v:0', '-map', '0:a:0',
-            '-c', 'copy',
-            '-ignore_unknown',
-            output_file
+            "ffmpeg",
+            "-y",
+            "-fflags", "+genpts",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_file,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c", "copy",
+            "-bsf:a", "aac_adtstoasc",
+            "-avoid_negative_ts", "make_zero",
+            "-ignore_unknown",
+            output_file,
         ]
         
         # print("Running FFmpeg with the following command:")
@@ -196,17 +211,11 @@ class Downloader:
         # FFmpeg の終了コード確認
         if process.returncode == 0:
             try:
-                os.remove(list_file)
-                print("Temporary files have been successfully cleaned up.")
+                shutil.rmtree(temp_folder)
+                print(f"Temporary folder removed: {temp_folder}")
             except Exception as e:
-                print(f"Failed to remove {list_file}: {e}")
-            
-            for file in downloaded_files:
-                try:
-                    os.remove(file)
-                except Exception as e:
-                    print(f"Failed to remove {file}: {e}")
+                print(f"Failed to remove temp folder {temp_folder}: {e}")
         else:
-            print(f"FFmpeg failed with return code {process.returncode}. Keeping temporary files for inspection.")
+            print(f"FFmpeg failed with return code {process.returncode}. Keeping temporary files for resume.")
 
         print("✅ Ready to watch the video.")
